@@ -1,0 +1,6 @@
+* text=auto eol=lf
+# served byte-for-byte by vogchat.com; never rewrite line endings
+src/crypto.js -text
+*.png binary
+# helper that draws the README animation; not part of the library
+scripts/make-animation.py linguist-detectable=false

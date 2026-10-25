@@ -1,0 +1,20 @@
+{
+  "name": "vogchat-crypto",
+  "version": "1.0.0",
+  "description": "The end-to-end encryption used by VogChat: PBKDF2 + HKDF key derivation and AES-256-GCM, on the standard WebCrypto API.",
+  "private": true,
+  "license": "Apache-2.0",
+  "homepage": "https://vogchat.com",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/vogchat/vogchat-crypto.git"
+  },
+  "keywords": ["end-to-end-encryption", "e2ee", "webcrypto", "aes-gcm", "pbkdf2", "hkdf", "privacy", "chat"],
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "test": "node --test test/crypto.test.js",
+    "verify-live": "node scripts/verify-live.js"
+  }
+}
