@@ -1,6 +1,6 @@
 # VogChat Security Whitepaper
 
-**Version 1.2 · October 2026 · Protocol `vogchat-e2e-v1`**
+**Version 1.3 · October 2026 · Protocol `vogchat-e2e-v1`**
 
 This document describes how VogChat protects conversations: what is encrypted, how the keys are made, what the server can and cannot see, and where the protection ends. It is written for security researchers and for anyone who wants to check our claims instead of trusting them.
 
@@ -124,7 +124,7 @@ payload    = base64url(iv || ciphertext)
 - **iOS app:** the room code and password are stored in the iOS **Keychain** (via `expo-secure-store`).
 - **Web:** they are stored in the browser's `localStorage` for vogchat.com, on that device only.
 
-On the web, anything that can run script on vogchat.com can read `localStorage` and `sessionStorage`. A cross-site scripting (XSS) bug would therefore expose remembered passwords. To reduce that risk vogchat.com loads no third-party scripts, and remembering a room is opt-in. On iOS the Keychain is used instead.
+On the web, anything that can run script on vogchat.com can read `localStorage` and `sessionStorage`. A cross-site scripting (XSS) bug would therefore expose remembered passwords, the raw key of the open room, and owner keys. To reduce that risk vogchat.com loads no third-party scripts, and remembering a room is opt-in. On iOS the Keychain is used instead.
 
 If "Remember this room" is off, the room is not saved to the device's chat list. Saved rooms can be deleted from the device at any time.
 
@@ -212,16 +212,17 @@ What the server keeps, and for how long. This matches the [privacy policy](https
 | Call audio and video | **No** | Never recorded; the relay forwards packets without logs |
 | Who is in a call | In memory only | Until the call ends |
 | Owner key hash, lock and community-link settings | Yes | Until the room is closed |
-| Reports (room code, reason, count, time) | Yes | The latest 200 |
+| Reports (room code, reason, count, time) | Yes | Up to 90 days, at most the latest 200 |
 | Removal block (session token hash, keyed address hash) | Yes | 15 minutes |
 | Room code, creation time, Argon2id hash of `authKey` | Yes | Until the room is closed or deletion is requested |
 | Meeting times / notes | Yes (ciphertext in E2E rooms), with the sender's nickname and time | Up to 3 days, newest 15 per room |
 | Network address | As a keyed HMAC-SHA-256 hash, for rate limits | Minutes to one hour |
 | Visit statistics | Daily totals only (page views, rooms created, joins, device type, language) and a count of unique visitors made from hashed addresses that cannot be reversed | 400 days |
 | Web server access log (address, time, page) | Yes, standard server log | 14 days, for security |
+| Application log | Technical events only: no addresses, room codes or content | — |
 | Contact form messages | The text you write and an anonymous sender code; forwarded to the team's e-mail | Until handled |
 
-Meeting times, rate limits and statistics live in Redis, which periodically snapshots to the server's disk. Message traffic goes through Redis publish/subscribe, which does not store messages.
+Meeting times, rate limits, reports and statistics live in Redis, which saves a snapshot to the server's disk about once an hour; each snapshot replaces the previous one, so expired data leaves the disk within about an hour. Message traffic goes through Redis publish/subscribe, which does not store messages.
 
 ## 9. Known limitations
 
@@ -249,6 +250,8 @@ All messages in a room use the same `encKey`. Someone who recorded the ciphertex
 
 Everyone who knows the password holds the same key. Nicknames are not verified, so a member can choose any name, including someone else's.
 
+AES-GCM proves that a message was made by *someone who holds the room key*, not by which member. The sender's member id and nickname travel outside the encryption, so a malicious server could show a genuine message as coming from a different member of the same room (it still cannot change the content or create new messages). Binding the sender, message id, message type and key epoch into the authenticated data, and later per-member signing keys, are on the [roadmap](#11-roadmap).
+
 ### 9.4 Code delivery on the web
 
 On the web, `crypto.js` is downloaded from vogchat.com on each visit, as with every web app. A compromised server could serve modified code to a specific visitor. Mitigations available today:
@@ -272,7 +275,9 @@ Photos close after 10 seconds on the receiving device. This is enforced by the a
 
 ### 9.8 Removal does not change the key
 
-Removing a person stops their connection and keeps them out for 15 minutes, but they still know the password, and therefore `encKey`. The owner should change the password (section 4) to keep them out for good and stop them from reading anything they might capture later.
+Removing a person stops their connection and keeps them out for 15 minutes, but they still know the password, and therefore `encKey`. The owner should change the password (section 4) to keep them out for good and stop them from reading anything they might capture later; the web client offers this right after a removal.
+
+The new password is sent encrypted with the **old** `encKey`, which the removed person still holds. An honest server delivers it only to the people connected at that moment, but a **malicious server could forward it to the removed person**, who could then decrypt it. Password change therefore excludes a removed member only as long as the server follows the protocol. Where that matters, change the password and tell the new one to the remaining people outside VogChat, or open a new room. A group key update that removed members cannot decrypt (for example based on MLS) is on the [roadmap](#11-roadmap).
 
 ### 9.9 Only the encryption module is open
 
@@ -300,6 +305,8 @@ The same check runs automatically every day in [GitHub Actions](https://github.c
 
 **Check it in your own browser.** Open vogchat.com, open the developer tools, and compare the SHA-256 of `https://vogchat.com/crypto.js` with `src/crypto.js` here. In a room, the Network tab shows that only base64url ciphertext crosses the WebSocket.
 
+**What these checks do not prove.** They show that the encryption module is correct and that vogchat.com serves it unchanged. They do not show that the rest of the web page uses it for every message, that the page does not send anything elsewhere before encryption, that every visitor receives the same files, that the iOS app runs the same code, or what the server stores. Those parts are not open source yet (see the status note at the top and 9.9); opening the web client is the next step on the [roadmap](#11-roadmap).
+
 **Test vectors.** For independent implementations:
 
 | Room code | Password | `authKey` | `encKey` |
@@ -311,7 +318,8 @@ The same check runs automatically every day in [GitHub Actions](https://github.c
 ## 11. Roadmap
 
 - **Stronger room passwords:** a strength hint while typing and longer passphrases (9.1; the minimum was raised to 6 letters on 25 October 2026).
-- **Replay protection:** message ids and timestamps inside the encrypted payload, with duplicate detection (9.6).
+- **Replay protection and sender binding:** message ids, timestamps, message type, sender and key epoch inside the authenticated data, with duplicate detection (9.3, 9.6).
+- **Member removal that holds against the server:** a group key update that removed members cannot decrypt (9.8).
 - **Open-sourcing the clients:** the web client first, then the iOS app, so the whole client side can be reviewed.
 - **Encrypting more metadata:** nicknames and reactions inside the end-to-end layer.
 - **Per-session keys and forward secrecy:** evaluating a ratcheting design (for example on top of MLS) without giving up the no-account model.
@@ -323,6 +331,7 @@ The same check runs automatically every day in [GitHub Actions](https://github.c
 
 ## Changelog
 
+- **1.3** (31 October 2026): documented that a malicious server could forward a password change to a removed member (9.8) and could misattribute the sender of a message (9.3); what the public checks do not prove (section 10); reports kept at most 90 days, hourly Redis snapshots, no room codes in the application log (section 8); XSS also exposes owner keys (section 4).
 - **1.2** (31 October 2026): room owner and owner key, password change (key rotation), removal and report votes, community links, encrypted voice messages and documents, encrypted call setup, DTLS-SRTP calls and our own STUN/TURN relay; limitations 9.8 and 9.9.
 - **1.1** (25 October 2026): new rooms need 6–15 letters; documented replay (9.6), web storage of the raw key and XSS exposure (section 4), and that only the crypto module is open.
 - **1.0** (25 October 2026): first public version.
