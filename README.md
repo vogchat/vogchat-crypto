@@ -35,7 +35,7 @@ This repository contains the exact encryption code that runs on [vogchat.com](ht
 
 1. Friends agree on a **room code** and a **room password**.
 2. Each device stretches the password with **PBKDF2-SHA-256** (300,000 iterations, room code as salt) and splits the result with **HKDF** into two keys:
-   - `authKey` proves to the server that you know the password. The server only stores an Argon2id hash of it.
+   - `authKey` is sent to the server at each login to prove that you know the password. The server stores only an Argon2id hash of it, and `authKey` does not reveal `encKey`.
    - `encKey` encrypts messages. **It never leaves the device.**
 3. Messages, photos, voice messages, documents, reply quotes, meeting times and call setup are encrypted with **AES-256-GCM** and a fresh random IV. Content is relayed in real time and never stored; meeting times are kept, encrypted, for up to 3 days so friends who come online later still see them. Calls are encrypted with DTLS-SRTP, and their setup (including the certificate fingerprints) goes through the room encryption above, so the server cannot intercept them. Details in the [whitepaper](WHITEPAPER.md).
 
