@@ -1,6 +1,6 @@
 # VogChat Security Whitepaper
 
-**Version 1.1 · October 2026 · Protocol `vogchat-e2e-v1`**
+**Version 1.2 · October 2026 · Protocol `vogchat-e2e-v1`**
 
 This document describes how VogChat protects conversations: what is encrypted, how the keys are made, what the server can and cannot see, and where the protection ends. It is written for security researchers and for anyone who wants to check our claims instead of trusting them.
 
@@ -69,6 +69,7 @@ flowchart LR
 | **Web client** (vogchat.com) | Runs in the browser. Loads [`crypto.js`](src/crypto.js) from vogchat.com and uses the browser's built-in WebCrypto. |
 | **iOS app** | Native app. Runs the *same* `crypto.js` inside an invisible system WebView, so the iPhone uses the platform's native WebCrypto implementation and exactly the code in this repository. |
 | **Server** | A Go service behind TLS. Creates rooms, checks room logins, and relays WebSocket messages between the people in a room. It never receives the room password or the encryption key. |
+| **Call relay (TURN)** | Our own relay in the EU, used only when two devices in a call cannot reach each other directly. It forwards encrypted call media (section 6.1) and keeps no call logs. Connection setup (STUN) also uses only our own server. |
 
 All traffic between clients and the server uses TLS (HTTPS and WSS). End-to-end encryption is applied *inside* that, so the content stays encrypted even where TLS ends: on the server itself.
 
@@ -116,6 +117,7 @@ payload    = base64url(iv || ciphertext)
 | Room password | Chosen by the room's creator | In the people's heads; optionally on the device (below) | Only as the user shares it themselves |
 | `encKey` | Derived on the device at login | In memory as a non-extractable `CryptoKey`. On the web, the raw key and the password are also kept in the tab's `sessionStorage` while the room is open, so a page reload can resume; they are cleared when you leave the room. | **Never** |
 | `authKey` | Derived on the device at login | Sent once per login | To the server, which stores only an Argon2id hash of it |
+| Owner key | 32 random bytes, made on the device that creates the room | That device's storage (`localStorage` on the web) | Sent to prove ownership when the owner opens the room; the server stores only a keyed hash (HMAC-SHA-256). It is not derived from the password and gives no access to content. |
 
 **Remembered rooms.** Users can choose "Remember this room" so they do not have to retype the password:
 
@@ -126,7 +128,14 @@ On the web, anything that can run script on vogchat.com can read `localStorage` 
 
 If "Remember this room" is off, the room is not saved to the device's chat list. Saved rooms can be deleted from the device at any time.
 
-**Rotation.** Keys are bound to the room code and password. There is no in-room key rotation; a new password means a new room. See [section 9](#9-known-limitations).
+**Password change (rotation).** Keys are bound to the room code and password. The room owner can change the password:
+
+1. The owner's device derives `authKey'` and `encKey'` from the new password (section 3.1).
+2. It sends `authKey'` to the server, together with the new password encrypted with the **current** `encKey` (section 3.2).
+3. The server replaces the stored hash, increases the room's key epoch, and forwards the encrypted new password to the people who are in the room at that moment. Their devices decrypt it and switch to `encKey'`.
+4. Session tokens issued before the change stop working, so anyone who was not in the room must learn the new password to come back.
+
+The server never sees the new password, only `authKey'` and ciphertext. Everyone who is in the room during the change receives the new password; to keep someone out, remove them first (section 5), then change the password. Old messages are not re-encrypted (VogChat does not store them).
 
 ## 5. Room access and invitations
 
@@ -138,12 +147,17 @@ If "Remember this room" is off, the room is not saved to the device's chat list.
 
 **Online guessing** is rate limited: 5 wrong passwords per 10 minutes per network address (addresses are only kept as a keyed hash; see [section 8](#8-metadata-and-data-retention)). Room creation is limited to 5 rooms per hour per address.
 
+**Room owner.** The device that creates a room keeps the owner key (section 4). With it, the owner can remove a person, lock the room (no new joins), change the password, and close the room for everyone. The server enforces these actions; a removed person is refused for 15 minutes (by session token, and new joins by a keyed hash of their network address). Rooms created before October 2026, and rooms created in app versions without this feature, have no owner.
+
+**Reports.** Reporting a person hides their messages for the reporter immediately. The person is removed only when a strict majority of the other people in the room (at least two) report them. The server sees who reported whom, because it has to count the votes; it keeps only the room code, the reason, the count and the time.
+
 **Invitations.**
 
 | Invite type | Contains | Notes |
 | --- | --- | --- |
 | Shared link / text | Room code only | The password is told separately. |
 | QR code (shown in a room) | Room code **and** password, in the URL fragment (`#s=…`) | Browsers do not send the fragment to the server. Anyone who can see or photograph the QR code can join, so it is meant for showing to someone next to you. |
+| Community link (owner turns it on) | Room code **and** password, in the URL fragment | Anyone with the link can join, up to 6 people at a time. The room closes itself 1 hour after it becomes empty. Changing the password cancels old links. |
 
 ## 6. What is encrypted, and what is not
 
@@ -155,10 +169,21 @@ For rooms created with end-to-end encryption (all rooms created since protocol `
 | Photos | ✅ | Ciphertext and its size |
 | Quoted text in replies | ✅ | Ciphertext |
 | Meeting times / notes | ✅ | Ciphertext and when it was set |
+| Voice messages and documents | ✅ | Ciphertext, its size and the kind (voice or document) |
+| Call setup (WebRTC SDP and ICE candidates) | ✅ | Ciphertext, and between which two members it is sent |
+| Call audio and video | ✅ (DTLS-SRTP, section 6.1) | Nothing when direct; encrypted packets when passed through the relay |
+| Who is in a call, and whether it is a video call | ❌ | Yes, so others can see a call is going on |
+| Owner actions (remove, lock, close, password change) and report votes | ❌ (the new password itself is encrypted) | Yes, needed to enforce them |
 | Nicknames | ❌ | Yes, so they can be shown in the member list |
 | Reactions (one of 6 emoji) | ❌ | Yes |
 | Typing and "seen" signals | ❌ | That they happened, and when |
 | Room code, join and leave times, number of people online | ❌ | Yes, needed to run the room |
+
+### 6.1 Calls
+
+Calls use WebRTC. Audio and video are encrypted with DTLS-SRTP between the devices in the call; group calls connect every pair of devices directly (up to 6 people). The WebRTC setup messages, including the DTLS certificate fingerprints, are encrypted with the room's `encKey` before they reach the server, so the server can neither read them nor swap in its own fingerprints to intercept the call. When a direct connection is not possible, the encrypted media passes through our TURN relay, which cannot decrypt it. Relay logins are short-lived (12 hours) and contain only an expiry time.
+
+To connect directly, each device learns the network address of the other devices in the call. This is inherent to peer-to-peer calls; see section 7.
 
 **Legacy rooms.** A small number of rooms created before end-to-end encryption existed still work. Their content is protected by TLS in transit but is not end-to-end encrypted. The app labels encrypted rooms, and every new room is end-to-end encrypted.
 
@@ -172,6 +197,8 @@ For rooms created with end-to-end encryption (all rooms created since protocol `
 | **Someone who learns the room code** | No | Must also know the password; online guessing is rate limited. |
 | **Someone who learns the password** (or sees the QR code) | Yes, from then on | Equivalent to being invited. |
 | **A person in the room** | Yes | They are a participant. They can screenshot or copy anything they see. |
+| **Someone in a call with you** | Yes (they are in the call) | They also learn your network address, because the devices connect directly. Calls only with people you trust. |
+| **A removed person** | Not new messages after the password is changed | Until the owner changes the password, they still know it; the server refuses them for 15 minutes. |
 | **A thief with an unlocked device** | Yes, for remembered rooms | Device security (passcode, Keychain) is the protection. |
 
 ## 8. Metadata and data retention
@@ -181,6 +208,12 @@ What the server keeps, and for how long. This matches the [privacy policy](https
 | Data | Kept | For how long |
 | --- | --- | --- |
 | Message text and photos | **No** | Relayed in real time, never written to storage |
+| Voice messages and documents | **No** | Relayed in real time, never written to storage |
+| Call audio and video | **No** | Never recorded; the relay forwards packets without logs |
+| Who is in a call | In memory only | Until the call ends |
+| Owner key hash, lock and community-link settings | Yes | Until the room is closed |
+| Reports (room code, reason, count, time) | Yes | The latest 200 |
+| Removal block (session token hash, keyed address hash) | Yes | 15 minutes |
 | Room code, creation time, Argon2id hash of `authKey` | Yes | Until the room is closed or deletion is requested |
 | Meeting times / notes | Yes (ciphertext in E2E rooms), with the sender's nickname and time | Up to 3 days, newest 15 per room |
 | Network address | As a keyed HMAC-SHA-256 hash, for rate limits | Minutes to one hour |
@@ -237,6 +270,14 @@ The ciphertext of a message does not contain a sequence number or timestamp, and
 
 Photos close after 10 seconds on the receiving device. This is enforced by the app, not by cryptography: a recipient can still photograph the screen with another device.
 
+### 9.8 Removal does not change the key
+
+Removing a person stops their connection and keeps them out for 15 minutes, but they still know the password, and therefore `encKey`. The owner should change the password (section 4) to keep them out for good and stop them from reading anything they might capture later.
+
+### 9.9 Only the encryption module is open
+
+The call, voice-message and room-owner logic described above runs in the web client and the server, which are not open source yet (see the status note at the top). The cryptographic primitive they use for every encrypted payload, including call setup and the new password, is `encrypt()`/`decrypt()` from `src/crypto.js`.
+
 ## 10. Verification
 
 You do not have to take any of this on trust.
@@ -282,5 +323,6 @@ The same check runs automatically every day in [GitHub Actions](https://github.c
 
 ## Changelog
 
+- **1.2** (31 October 2026): room owner and owner key, password change (key rotation), removal and report votes, community links, encrypted voice messages and documents, encrypted call setup, DTLS-SRTP calls and our own STUN/TURN relay; limitations 9.8 and 9.9.
 - **1.1** (25 October 2026): new rooms need 6–15 letters; documented replay (9.6), web storage of the raw key and XSS exposure (section 4), and that only the crypto module is open.
 - **1.0** (25 October 2026): first public version.
