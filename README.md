@@ -6,7 +6,7 @@
 
 **The end-to-end encryption behind [VogChat](https://vogchat.com): private chat rooms with no account and no phone number.**
 
-<sub>Open-source cryptographic component · not independently audited</sub>
+<sub>Open-source cryptographic component</sub>
 
 [![Tests](https://github.com/vogchat/vogchat-crypto/actions/workflows/test.yml/badge.svg?branch=main)](https://github.com/vogchat/vogchat-crypto/actions/workflows/test.yml)
 [![Live site matches this repo](https://github.com/vogchat/vogchat-crypto/actions/workflows/live-check.yml/badge.svg?branch=main)](https://github.com/vogchat/vogchat-crypto/actions/workflows/live-check.yml)
@@ -83,14 +83,31 @@ The tests load `src/crypto.js` **unchanged**, the way a browser does, and check 
 | ✅ Server cannot read content | Only ciphertext and a hash of `authKey` reach it. |
 | ✅ No message storage | Messages are relayed in real time and never written to disk. |
 | ✅ Tamper-evident | AES-GCM rejects any modified message. |
+| ✅ Sender bound to each message | The sender's member id and nickname are inside the encryption, so the server cannot relabel a message. |
 | ✅ Standard primitives | PBKDF2, HKDF, AES-GCM from WebCrypto. |
 | ⚠️ Strength depends on the password | Short passwords can be guessed offline by someone who controls the server. New rooms need 6+ letters. |
 | ⚠️ No replay protection yet | A malicious server could re-deliver an old ciphertext. It cannot forge or alter one. |
-| ⚠️ No forward secrecy yet | One key per room. |
+| ⚠️ One key per room | No forward secrecy yet, but nothing is kept to decrypt later: no message storage, traffic inside TLS, and the owner can change the password (and key) at any time. |
 | ⚠️ Some metadata is visible | Nicknames, reactions, and who is online when. |
-| ⚠️ Not yet audited | No independent audit so far. |
 
 The [whitepaper](WHITEPAPER.md) explains each of these in detail, with a full threat model and data retention table.
+
+## Common questions
+
+**If someone learns a room password later, can they read old messages?**
+Only if they had recorded the encrypted traffic at the moment it was sent. VogChat keeps no messages: the server relays them in real time and never writes them to storage, and the apps hold them in memory only, so they are gone when you leave the room or reload the page. The traffic itself also runs inside TLS (HTTPS / secure WebSocket). There is no message archive that we, or anyone who breaks into the server later, could hand over. Use a strong password (new rooms need 6+ letters); the room owner can change the password at any time, which moves the room to a new key.
+
+**Are open rooms private?**
+No, and the app says so before you join. Open rooms are public rooms for meeting new people: their password is given to the server so that anyone can join, which means anyone, the server included, can read them. For a private conversation, open a private room with your own password. That password never reaches the server.
+
+**Can the server make a message look like it came from someone else?**
+No. Every encrypted message carries its sender's member id and nickname *inside* the encryption, and the apps check them against what the server reports; a message that does not match is not shown. The server also cannot read, change or create messages. What encryption cannot stop: everyone who knows the room password shares the same key, so a member can pick any nickname. Share the password only with people you trust.
+
+**What do you keep?**
+No messages, photos, voice messages, documents or calls. A room keeps its code and a hash of the login key until it closes. If you leave a meeting time, it can carry a short note (at most 80 characters, at most 15 per room); it is stored encrypted and deleted after 3 days. Network addresses are used only in hashed form for rate limits, for up to an hour. The full table is in the [whitepaper](WHITEPAPER.md#8-metadata-and-data-retention).
+
+**Why VogChat and not Signal?**
+Signal is an excellent messenger. VogChat is for a different moment: talking with someone **without giving them your phone number**, without an account, from any browser or the iPhone app, in a room you can close for good. The encryption that protects your messages is open here, tested, and checked against the live site every day.
 
 ## Repository layout
 
@@ -108,7 +125,6 @@ WHITEPAPER.md            design, threat model, retention, limitations, roadmap
 - Open-sourcing the web client, then the iOS app
 - Encrypting nicknames and reactions
 - Forward secrecy, evaluated on top of MLS
-- An independent security audit, published here
 
 ## Reporting a vulnerability
 

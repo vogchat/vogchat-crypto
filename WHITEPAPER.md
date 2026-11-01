@@ -1,12 +1,12 @@
 # VogChat Security Whitepaper
 
-**Version 1.5 · November 2026 · Protocol `vogchat-e2e-v1`**
+**Version 1.6 · November 2026 · Protocol `vogchat-e2e-v1`**
 
 This document describes how VogChat protects conversations: what is encrypted, how the keys are made, what the server can and cannot see, and where the protection ends. It is written for security researchers and for anyone who wants to check our claims instead of trusting them.
 
 Everything here can be verified against the code in this repository ([`src/crypto.js`](src/crypto.js)) and the tests in [`test/`](test/). If you find a difference between this document and the code, the code is what runs, and we want to hear about it (see [SECURITY.md](SECURITY.md)).
 
-> **Status:** open-source cryptographic component, **not independently audited**. Only the encryption module is open; the server and the app clients are not (yet), so some statements about them cannot be verified from this repository alone. This whitepaper and the open code are the first step towards an audit.
+> **Status:** open-source cryptographic component. Only the encryption module is open; the server and the app clients are not (yet), so some statements about them cannot be verified from this repository alone.
 
 ---
 
@@ -217,12 +217,14 @@ What the server keeps, and for how long. This matches the [privacy policy](https
 | Reports (room code, reason, count, time) | Yes | Up to 90 days, at most the latest 200 |
 | Removal block (session token hash, keyed address hash) | Yes | 15 minutes |
 | Room code, creation time, Argon2id hash of `authKey` | Yes | Until the room is closed or deletion is requested |
-| Meeting times / notes | Yes (ciphertext in E2E rooms), with the sender's nickname and time | Up to 3 days, newest 15 per room |
+| Meeting times / notes | Yes (ciphertext in E2E rooms; a note is at most 80 characters), with the sender's nickname and time | Up to 3 days, newest 15 per room |
 | Network address | As a keyed HMAC-SHA-256 hash, for rate limits | Minutes to one hour |
 | Visit statistics | Daily totals only (page views, rooms created, joins, device type, language) and a count of unique visitors made from hashed addresses that cannot be reversed | 400 days |
-| Web server access log (address, time, page) | Yes, standard server log | 14 days, for security |
+| Web server access log | Time, page path, status and size only: **no network address**, no query strings | 14 days, for security |
 | Application log | Technical events only: no addresses, room codes or content | — |
 | Contact form messages | The text you write and an anonymous sender code; forwarded to the team's e-mail | Until handled |
+
+Until 1 November 2026 the web server access log also held network addresses; those older entries are deleted automatically by 15 November 2026. Rare web server error entries can still contain an address and are also deleted after 14 days.
 
 Meeting times, rate limits, reports and statistics live in Redis, which saves a snapshot to the server's disk about once an hour; each snapshot replaces the previous one, so expired data leaves the disk within about an hour. Message traffic goes through Redis publish/subscribe, which does not store messages.
 
@@ -246,13 +248,13 @@ Real words fall much faster than random letters. **The end-to-end protection aga
 
 ### 9.2 No forward secrecy
 
-All messages in a room use the same `encKey`. Someone who recorded the ciphertext and later learns the password can decrypt the recorded messages. VogChat does not store messages, which limits this to an adversary who was already recording traffic on the server.
+All messages in a room use the same `encKey`. Someone who recorded the ciphertext and later learns the password can decrypt the recorded messages. In practice this needs an adversary who was already recording at the time: VogChat keeps no messages (the server relays them without writing them to storage, and the apps hold them in memory only, so they are gone after leaving or reloading), and the traffic runs inside TLS. The room owner can change the password at any time, which moves the room to a new key (section 4).
 
-### 9.3 No authentication of individual members
+### 9.3 Members share one key
 
-Everyone who knows the password holds the same key. Nicknames are not verified, so a member can choose any name, including someone else's.
+Everyone who knows the password holds the same key, so AES-GCM proves that a message was made by *someone who holds the room key*. Nicknames are chosen freely, so a member of the room can pick any name, including someone else's.
 
-AES-GCM proves that a message was made by *someone who holds the room key*, not by which member. The sender's member id and nickname travel outside the encryption, so a malicious server could show a genuine message as coming from a different member of the same room (it still cannot change the content or create new messages). Binding the sender, message id, message type and key epoch into the authenticated data, and later per-member signing keys, are on the [roadmap](#11-roadmap).
+**Sender binding (since 1 November 2026).** The server cannot relabel messages. Every sealed payload (text, photo, voice message, document, meeting time, call setup, password change) carries `_s = {i: member id, n: nickname}` inside the encryption (call setup from the iPhone app carries the member id only). The receiving app compares `_s.i` with the sender id the server reports and does not show a message that does not match; the nickname shown is the one from inside the encryption. So a malicious server can no longer present a genuine message as coming from a different member. Messages from app versions older than this change carry no `_s` and are shown as before. Per-member signing keys are on the [roadmap](#11-roadmap).
 
 ### 9.4 Code delivery on the web
 
@@ -320,12 +322,11 @@ The same check runs automatically every day in [GitHub Actions](https://github.c
 ## 11. Roadmap
 
 - **Stronger room passwords:** a strength hint while typing and longer passphrases (9.1; the minimum was raised to 6 letters on 25 October 2026).
-- **Replay protection and sender binding:** message ids, timestamps, message type, sender and key epoch inside the authenticated data, with duplicate detection (9.3, 9.6).
+- **Replay protection:** message ids, timestamps, message type and key epoch inside the authenticated data, with duplicate detection (9.6).
 - **Member removal that holds against the server:** a group key update that removed members cannot decrypt (9.8).
 - **Open-sourcing the clients:** the web client first, then the iOS app, so the whole client side can be reviewed.
 - **Encrypting more metadata:** nicknames and reactions inside the end-to-end layer.
 - **Per-session keys and forward secrecy:** evaluating a ratcheting design (for example on top of MLS) without giving up the no-account model.
-- **Independent security audit**, with the report published here.
 
 ---
 
@@ -333,6 +334,7 @@ The same check runs automatically every day in [GitHub Actions](https://github.c
 
 ## Changelog
 
+- **1.6** (1 November 2026): sender binding inside the encryption (9.3); the web server access log no longer records network addresses (section 8); meeting notes at most 80 characters; clearer notes on old messages (9.2).
 - **1.5** (1 November 2026): calls in open rooms, always relayed so addresses stay hidden.
 - **1.4** (1 November 2026): open rooms (public lobby) in section 5.
 - **1.3** (31 October 2026): documented that a malicious server could forward a password change to a removed member (9.8) and could misattribute the sender of a message (9.3); what the public checks do not prove (section 10); reports kept at most 90 days, hourly Redis snapshots, no room codes in the application log (section 8); XSS also exposes owner keys (section 4).
